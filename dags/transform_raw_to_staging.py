@@ -359,14 +359,397 @@ def transform_raw_to_staging_pipeline():
         load_job.result()
 
         print(f"Loaded {len(final_df)} rows into {target_table}")
+    
+    @task
+    def transform_aircraft_monthly():
+        client = bigquery.Client(project=PROJECT_ID)
+
+        source_table = f"{PROJECT_ID}.{RAW_DATASET}.monthly_aircraft_passengers"
+        target_table = f"{PROJECT_ID}.{STAGING_DATASET}.aircraft_monthly"
+
+        df = client.query(f"SELECT * FROM `{source_table}`").to_dataframe()
+
+        print("Aircraft raw shape:", df.shape)
+        print("Aircraft raw columns before cleaning:", df.columns.tolist()[:10])
+
+        if df.empty:
+            raise ValueError("monthly_aircraft_passengers raw table is empty.")
+
+        # Clean column names
+        df.columns = [str(col).strip() for col in df.columns]
+
+        print("Aircraft raw columns after cleaning:", df.columns.tolist()[:10])
+
+        # Drop auto id if present
+        if "_id" in df.columns:
+            df = df.drop(columns=["_id"])
+
+        # Detect series column
+        possible_series_cols = ["Data Series", "DataSeries", "data_series"]
+        series_col = next((c for c in possible_series_cols if c in df.columns), None)
+
+        if series_col is None:
+            raise ValueError(f"No series column found. Columns: {df.columns.tolist()}")
+
+        df[series_col] = df[series_col].astype(str).str.strip()
+        df = df[df[series_col].notna()].copy()
+
+        # Keep only the metric you want
+        # Change this if later you want a different aircraft metric
+        target_metric = "Total Passengers"
+
+        df = df[df[series_col] == target_metric].copy()
+
+        if df.empty:
+            raise ValueError(
+                f"No rows found for metric '{target_metric}' in {source_table}. "
+                f"Available sample values: {client.query(f'SELECT DISTINCT `{series_col}` FROM `{source_table}` LIMIT 20').to_dataframe().iloc[:,0].tolist()}"
+            )
+
+        # All other columns should be month columns like 2026Jan / 2026 Jan / 2026 Jan 
+        month_columns = [col for col in df.columns if col != series_col]
+
+        print("Aircraft month columns sample:", month_columns[:10])
+
+        df_long = df.melt(
+            id_vars=[series_col],
+            value_vars=month_columns,
+            var_name="month_str",
+            value_name="aircraft_passengers",
+        )
+
+        # Clean month strings
+        df_long["month_str"] = (
+            df_long["month_str"]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\s+", " ", regex=True)
+        )
+
+        # Convert values to numeric
+        df_long["aircraft_passengers"] = pd.to_numeric(
+            df_long["aircraft_passengers"],
+            errors="coerce"
+        )
+
+        # Handle formats like:
+        # 2026Jan
+        # 2026 Jan
+        # 2026 Jan 
+        # Convert 2026Jan -> 2026 Jan first
+        df_long["month_str_clean"] = df_long["month_str"].str.replace(
+            r"^(\d{4})([A-Za-z]{3})$",
+            r"\1 \2",
+            regex=True
+        )
+
+        df_long["month"] = pd.to_datetime(
+            df_long["month_str_clean"],
+            format="%Y %b",
+            errors="coerce"
+        )
+
+        # Keep only valid rows
+        df_long = df_long.dropna(subset=["month", "aircraft_passengers"]).copy()
+
+        # Final shape
+        final_df = (
+            df_long[["month", "aircraft_passengers"]]
+            .sort_values("month")
+            .drop_duplicates(subset=["month"])
+            .reset_index(drop=True)
+        )
+
+        print("Aircraft final shape:", final_df.shape)
+        print(final_df.head())
+
+        if final_df.empty:
+            raise ValueError("Aircraft transformed dataframe is empty after cleaning.")
+
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_TRUNCATE",
+            schema=[
+                bigquery.SchemaField("month", "DATE"),
+                bigquery.SchemaField("aircraft_passengers", "FLOAT"),
+            ],
+        )
+
+        load_job = client.load_table_from_dataframe(
+            final_df,
+            target_table,
+            job_config=job_config,
+        )
+        load_job.result()
+
+        print(f"Loaded {len(final_df)} rows into {target_table}")
+
+    @task
+    def transform_traffic_monthly():
+        client = bigquery.Client(project=PROJECT_ID)
+
+        source_table = f"{PROJECT_ID}.{RAW_DATASET}.average_traffic_volume_entering"
+        target_table = f"{PROJECT_ID}.{STAGING_DATASET}.traffic_monthly"
+
+        df = client.query(f"SELECT * FROM `{source_table}`").to_dataframe()
+
+        print("Traffic raw shape:", df.shape)
+        print(df.head())
+
+        if df.empty:
+            raise ValueError("Traffic raw table is empty.")
+
+        # Clean columns
+        df.columns = [col.strip() for col in df.columns]
+
+        # Drop _id if exists
+        if "_id" in df.columns:
+            df = df.drop(columns=["_id"])
+
+        # Rename for consistency
+        df = df.rename(columns={
+            "year": "year",
+            "ave_daily_traffic_volume_entering_city": "traffic_volume"
+        })
+
+        # Convert types
+        df["year"] = pd.to_numeric(df["year"], errors="coerce")
+        df["traffic_volume"] = pd.to_numeric(df["traffic_volume"], errors="coerce")
+
+        df = df.dropna(subset=["year", "traffic_volume"])
+
+        # Expand year → 12 months
+        records = []
+
+        for _, row in df.iterrows():
+            year = int(row["year"])
+            value = row["traffic_volume"]
+
+            for month in range(1, 13):
+                records.append({
+                    "month": f"{year}-{month:02d}-01",
+                    "traffic_volume": value
+                })
+
+        final_df = pd.DataFrame(records)
+
+        # Convert to datetime
+        final_df["month"] = pd.to_datetime(final_df["month"])
+
+        final_df = final_df.sort_values("month").reset_index(drop=True)
+
+        print("Traffic final shape:", final_df.shape)
+        print(final_df.head())
+
+        if final_df.empty:
+            raise ValueError("Traffic transformed dataframe is empty.")
+
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_TRUNCATE",
+            schema=[
+                bigquery.SchemaField("month", "DATE"),
+                bigquery.SchemaField("traffic_volume", "FLOAT"),
+            ],
+        )
+
+        load_job = client.load_table_from_dataframe(
+            final_df,
+            target_table,
+            job_config=job_config,
+        )
+        load_job.result()
+
+        print(f"Loaded {len(final_df)} rows into {target_table}")
+
+    @task
+    def transform_hotel_monthly():
+        client = bigquery.Client(project=PROJECT_ID)
+
+        source_table = f"{PROJECT_ID}.{RAW_DATASET}.monthly_average_hotel_rates"
+        target_table = f"{PROJECT_ID}.{STAGING_DATASET}.hotel_monthly"
+
+        df = client.query(f"SELECT * FROM `{source_table}`").to_dataframe()
+
+        print("Hotel raw shape:", df.shape)
+
+        if df.empty:
+            raise ValueError("Hotel raw table is empty.")
+
+        # Clean columns
+        df.columns = [str(col).strip() for col in df.columns]
+
+        if "_id" in df.columns:
+            df = df.drop(columns=["_id"])
+
+        # Clean DataSeries
+        df["DataSeries"] = df["DataSeries"].astype(str).str.strip()
+
+        print("Available DataSeries:", df["DataSeries"].unique())
+
+        rate_row = df[df["DataSeries"] == "Average Room Rate"].copy()
+        occupancy_row = df[df["DataSeries"] == "Average Hotel Occupancy Rate"].copy()
+
+        if rate_row.empty or occupancy_row.empty:
+            raise ValueError("Required hotel metrics not found. Check DataSeries names.")
+
+        # Month columns
+        month_cols = [col for col in df.columns if col != "DataSeries"]
+
+        # Melt both
+        rate_long = rate_row.melt(
+            id_vars=["DataSeries"],
+            value_vars=month_cols,
+            var_name="month_str",
+            value_name="hotel_rate",
+        )
+
+        occ_long = occupancy_row.melt(
+            id_vars=["DataSeries"],
+            value_vars=month_cols,
+            var_name="month_str",
+            value_name="hotel_occupancy",
+        )
+
+        # Clean month format
+        def clean_month(col):
+            return (
+                col.astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
+                .str.replace(r"^(\d{4})([A-Za-z]{3})$", r"\1 \2", regex=True)
+            )
+
+        rate_long["month_str"] = clean_month(rate_long["month_str"])
+        occ_long["month_str"] = clean_month(occ_long["month_str"])
+
+        # Convert to datetime
+        rate_long["month"] = pd.to_datetime(rate_long["month_str"], format="%Y %b", errors="coerce")
+        occ_long["month"] = pd.to_datetime(occ_long["month_str"], format="%Y %b", errors="coerce")
+
+        # Convert values
+        rate_long["hotel_rate"] = pd.to_numeric(rate_long["hotel_rate"], errors="coerce")
+        occ_long["hotel_occupancy"] = pd.to_numeric(occ_long["hotel_occupancy"], errors="coerce")
+
+        # Drop invalid
+        rate_long = rate_long.dropna(subset=["month", "hotel_rate"])
+        occ_long = occ_long.dropna(subset=["month", "hotel_occupancy"])
+
+        # Merge
+        final_df = pd.merge(
+            rate_long[["month", "hotel_rate"]],
+            occ_long[["month", "hotel_occupancy"]],
+            on="month",
+            how="inner"
+        )
+
+        final_df = final_df.sort_values("month").reset_index(drop=True)
+
+        print("Hotel final shape:", final_df.shape)
+        print(final_df.head())
+
+        if final_df.empty:
+            raise ValueError("Hotel transformed dataframe is empty.")
+
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_TRUNCATE",
+            schema=[
+                bigquery.SchemaField("month", "DATE"),
+                bigquery.SchemaField("hotel_rate", "FLOAT"),
+                bigquery.SchemaField("hotel_occupancy", "FLOAT"),
+            ],
+        )
+
+        load_job = client.load_table_from_dataframe(
+            final_df,
+            target_table,
+            job_config=job_config,
+        )
+        load_job.result()
+
+        print(f"Loaded {len(final_df)} rows into {target_table}")
+
+    @task
+    def transform_public_holidays_monthly():
+        client = bigquery.Client(project=PROJECT_ID)
+
+        source_table = f"{PROJECT_ID}.{RAW_DATASET}.public_holidays"
+        target_table = f"{PROJECT_ID}.{STAGING_DATASET}.public_holidays_monthly"
+
+        df = client.query(f"SELECT * FROM `{source_table}`").to_dataframe()
+
+        print("Public holidays raw shape:", df.shape)
+        print("Public holidays raw columns:", df.columns.tolist())
+
+        if df.empty:
+            raise ValueError("public_holidays raw table is empty.")
+
+        # Clean columns
+        df.columns = [str(col).strip() for col in df.columns]
+
+        if "_id" in df.columns:
+            df = df.drop(columns=["_id"])
+
+        required_cols = ["country_name", "date"]
+        missing_cols = [c for c in required_cols if c not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns in public_holidays table: {missing_cols}")
+
+        # Use country_name as final country field
+        df["country"] = df["country_name"].astype(str).str.strip()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+        df = df.dropna(subset=["country", "date"]).copy()
+
+        # Remove empty / invalid country strings
+        df = df[df["country"] != ""].copy()
+        df = df[df["country"].str.lower() != "nan"].copy()
+
+        # Convert date -> month
+        df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
+
+        # Count number of public holidays in each country-month
+        final_df = (
+            df.groupby(["country", "month"], as_index=False)
+              .size()
+              .rename(columns={"size": "public_holiday_count"})
+              .sort_values(["country", "month"])
+              .reset_index(drop=True)
+        )
+
+        print("Public holidays monthly shape:", final_df.shape)
+        print(final_df.head())
+
+        if final_df.empty:
+            raise ValueError("Public holidays transformed dataframe is empty.")
+
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_TRUNCATE",
+            schema=[
+                bigquery.SchemaField("country", "STRING"),
+                bigquery.SchemaField("month", "DATE"),
+                bigquery.SchemaField("public_holiday_count", "INTEGER"),
+            ],
+        )
+
+        load_job = client.load_table_from_dataframe(
+            final_df,
+            target_table,
+            job_config=job_config,
+        )
+        load_job.result()
+
+        print(f"Loaded {len(final_df)} rows into {target_table}")
 
 
     dataset_task = ensure_staging_dataset()
     transform_task = transform_visitor_arrivals_monthly()
     gdp_task = transform_gdp_dataset()
     fx_task = transform_exchange_rates_monthly()
+    aircraft_task = transform_aircraft_monthly()
+    traffic_task = transform_traffic_monthly()
+    hotel_task = transform_hotel_monthly()
+    public_holiday_task = transform_public_holidays_monthly()
 
-    dataset_task >> transform_task >> gdp_task >> fx_task
+    dataset_task >> transform_task >> gdp_task >> fx_task >> aircraft_task >> traffic_task >> hotel_task >> public_holiday_task
 
 
 transform_raw_to_staging_dag = transform_raw_to_staging_pipeline()

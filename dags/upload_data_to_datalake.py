@@ -18,6 +18,7 @@ from datasets import DATASETS
 API_BUCKET_NAME = os.getenv("API_BUCKET_NAME")
 KAGGLE_BUCKET_NAME = os.getenv("KAGGLE_BUCKET_NAME")
 EXCHANGE_RATE_BUCKET_NAME = os.getenv("EXCHANGE_RATE_BUCKET_NAME")
+PUBLIC_HOLIDAY_BUCKET_NAME = os.getenv("PUBLIC_HOLIDAY_BUCKET_NAME")
 LOCAL_DIR = "/tmp/airflow_downloads"
 
 HEADERS = {
@@ -289,6 +290,85 @@ def data_ingestion_pipeline():
 
         return downloaded_metadata
 
+    @task
+    def download_public_holidays_and_upload(start_year=1975):
+        os.makedirs(LOCAL_DIR, exist_ok=True)
+
+        client = storage.Client()
+        bucket = client.bucket(PUBLIC_HOLIDAY_BUCKET_NAME)
+
+        # Download mapping file
+        reference_blob_path = "raw/public_holidays/country_name_to_code.csv"
+        local_reference_path = os.path.join(LOCAL_DIR, "country_name_to_code.csv")
+
+        bucket.blob(reference_blob_path).download_to_filename(local_reference_path)
+        print(f"Downloaded mapping file from gs://{PUBLIC_HOLIDAY_BUCKET_NAME}/{reference_blob_path}")
+
+        ref_df = pd.read_csv(local_reference_path)
+        ref_df.columns = [c.strip() for c in ref_df.columns]
+
+        # Standardize columns
+        if {"country_name", "country_code"}.issubset(ref_df.columns):
+            pass
+        elif {"Country", "Code"}.issubset(ref_df.columns):
+            ref_df = ref_df.rename(columns={"Country": "country_name", "Code": "country_code"})
+        elif {"name", "code"}.issubset(ref_df.columns):
+            ref_df = ref_df.rename(columns={"name": "country_name", "code": "country_code"})
+        else:
+            raise ValueError(f"Unexpected mapping columns: {ref_df.columns.tolist()}")
+
+        ref_df["country_name"] = ref_df["country_name"].astype(str).str.strip()
+        ref_df["country_code"] = ref_df["country_code"].astype(str).str.strip().str.upper()
+        ref_df = ref_df.dropna(subset=["country_name", "country_code"]).drop_duplicates(subset=["country_code"])
+
+        current_year = datetime.now().year
+        uploaded_files = []
+
+        for _, row in ref_df.iterrows():
+            country_code = row["country_code"]
+
+            print(f"Processing {country_code}")
+
+            for year in range(start_year, current_year + 1):
+                url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/{country_code}"
+                local_file = os.path.join(LOCAL_DIR, f"{country_code}_{year}.json")
+                bucket_path = f"raw/public_holidays/{country_code}/{year}.json"
+
+                blob = bucket.blob(bucket_path)
+
+                # Skip if exists
+                if blob.exists(client):
+                    continue
+
+                for attempt in range(1, 2):
+                    try:
+                        response = requests.get(url, headers=HEADERS, timeout=60)
+
+                        if response.status_code == 404:
+                            # just skip silently
+                            break
+
+                        if response.status_code == 429:
+                            time.sleep(min(2 ** attempt, 60))
+                            continue
+
+                        response.raise_for_status()
+
+                        with open(local_file, "w", encoding="utf-8") as f:
+                            f.write(response.text)
+
+                        blob.upload_from_filename(local_file, content_type="application/json")
+                        uploaded_files.append(bucket_path)
+
+                        break
+
+                    except requests.exceptions.RequestException as e:
+                        time.sleep(min(2 ** attempt, 60))
+
+        print(f"Total uploaded files: {len(uploaded_files)}")
+
+        return len(uploaded_files)
+
 
     api_tasks = []
     for dataset_name, dataset_info in DATASETS.items():
@@ -297,6 +377,7 @@ def data_ingestion_pipeline():
     
     kaggle_task = download_kaggle_dataset_and_upload()
     exchange_rate_task = download_exchange_rates_and_upload()
-    api_tasks >> kaggle_task >> exchange_rate_task
+    public_holiday_task = download_public_holidays_and_upload()
+    api_tasks >> kaggle_task >> exchange_rate_task >> public_holiday_task
 
 data_ingestion_dag = data_ingestion_pipeline()
