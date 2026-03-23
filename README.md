@@ -29,6 +29,7 @@ Data Sources → GCS (Raw Layer) → BigQuery (Raw Tables)
 
 ## Project Structure
 
+```text
 projectroot/
 │
 ├── dags/
@@ -53,6 +54,7 @@ projectroot/
 ├── airflow-setup.md
 ├── README.md
 └── .gitignore
+```
 
 ---
 
