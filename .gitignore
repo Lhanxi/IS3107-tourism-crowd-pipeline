@@ -6,3 +6,8 @@ plugins/
 .env
 
 keys/
+
+# Terraform files
+terraform/.terraform
+terraform.tfstate
+terraform.tfstate.backup

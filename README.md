@@ -154,4 +154,10 @@ docker compose down
 
 ---
 
+## Terraform (Optional)
+```bash
+gcloud auth activate-service-account --key-file=../keys/gcp-key.json
+gcloud config set project project-01cbb001-262f-45dc-8c6
+```
+
 EOF
