@@ -1,4 +1,3 @@
-cat << 'EOF' > README.md
 # IS3107 Tourism Crowd Pipeline
 
 ## Project Overview
@@ -36,6 +35,7 @@ projectroot/
 │   ├── upload_data_to_datalake.py
 │   ├── load_gcs_to_bigquery.py
 │   ├── transform_raw_to_staging.py
+│   ├── create_final_features_dag.py
 │
 ├── datasets/
 │   ├── datasets.py
@@ -156,8 +156,7 @@ docker compose down
 
 ## Terraform (Optional)
 ```bash
-gcloud auth activate-service-account --key-file=../keys/gcp-key.json
-gcloud config set project project-01cbb001-262f-45dc-8c6
+terraform init
+terraform plan
+terraform apply
 ```
-
-EOF
