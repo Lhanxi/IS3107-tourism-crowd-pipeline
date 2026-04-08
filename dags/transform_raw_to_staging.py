@@ -22,7 +22,7 @@ REGION_ROWS = {
     "Others",
 }
 
-TOTAL_ROW = "Total International Visitor Arrivals By Place Of Residence"
+TOTAL_ROW = "Total International Visitor Arrivals By Inbound Tourism Markets"
 
 @dag(
     dag_id="transform_raw_to_staging",
@@ -58,23 +58,40 @@ def transform_raw_to_staging_pipeline():
         df = client.query(query).to_dataframe()
 
         print("Raw shape:", df.shape)
-        print("Raw columns before cleaning:", df.columns.tolist()[:10])
+        print("Raw columns before cleaning:", df.columns.tolist()[:20])
+
+        if df.empty:
+            raise ValueError(f"{source_table} is empty.")
 
         # Clean column names
-        df.columns = [col.strip() for col in df.columns]
+        df.columns = [str(col).strip() for col in df.columns]
 
-        print("Raw columns after cleaning:", df.columns.tolist()[:10])
+        print("Raw columns after cleaning:", df.columns.tolist()[:20])
 
         # Drop auto id if present
         if "_id" in df.columns:
             df = df.drop(columns=["_id"])
 
-        # The first column is the series/market name
-        series_col = "Data Series"
+        # Detect series column
+        possible_series_cols = ["Data Series", "DataSeries", "data_series"]
+        series_col = next((c for c in possible_series_cols if c in df.columns), None)
 
+        if series_col is None:
+            raise ValueError(f"No series column found. Columns: {df.columns.tolist()}")
+
+        # Clean series values
         df = df[df[series_col].notna()].copy()
+        df[series_col] = df[series_col].astype(str).str.strip()
+        df = df[df[series_col] != ""].copy()
+        df = df[df[series_col].str.lower() != "nan"].copy()
+
+        # Month columns = everything except the series column
         month_columns = [col for col in df.columns if col != series_col]
 
+        print("Detected series column:", series_col)
+        print("Sample month columns:", month_columns[:10])
+
+        # Melt wide -> long
         df_long = df.melt(
             id_vars=[series_col],
             value_vars=month_columns,
@@ -82,18 +99,32 @@ def transform_raw_to_staging_pipeline():
             value_name="visitor_arrivals",
         )
 
+        # Convert arrivals to numeric
         df_long["visitor_arrivals"] = pd.to_numeric(
             df_long["visitor_arrivals"],
             errors="coerce"
         )
 
-        # Convert "2026 Jan" -> datetime
+        # Clean month strings
+        # Handles:
+        # 2025May -> 2025 May
+        # 2025 May -> 2025 May
+        df_long["month_str"] = (
+            df_long["month_str"]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\s+", " ", regex=True)
+            .str.replace(r"^(\d{4})([A-Za-z]{3})$", r"\1 \2", regex=True)
+        )
+
+        # Parse to datetime
         df_long["month"] = pd.to_datetime(
             df_long["month_str"],
             format="%Y %b",
             errors="coerce"
         )
 
+        # Rename and keep needed columns
         df_long = df_long.rename(columns={series_col: "market"})
         df_long = df_long[["market", "month", "visitor_arrivals"]]
         df_long = df_long.dropna(subset=["market", "month", "visitor_arrivals"])
@@ -119,8 +150,27 @@ def transform_raw_to_staging_pipeline():
         print("Country table shape:", df_country.shape)
         print(df_country.head())
 
+        if df_country.empty:
+            raise ValueError("Country dataframe is empty after transformation.")
+
+        if df_total.empty:
+            raise ValueError("Total dataframe is empty after transformation.")
+
         job_config = bigquery.LoadJobConfig(
-            write_disposition="WRITE_TRUNCATE"
+            write_disposition="WRITE_TRUNCATE",
+            schema=[
+                bigquery.SchemaField("country", "STRING"),
+                bigquery.SchemaField("month", "DATE"),
+                bigquery.SchemaField("visitor_arrivals", "FLOAT"),
+            ],
+        )
+
+        total_job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_TRUNCATE",
+            schema=[
+                bigquery.SchemaField("month", "DATE"),
+                bigquery.SchemaField("total_visitor_arrivals", "FLOAT"),
+            ],
         )
 
         country_job = client.load_table_from_dataframe(
@@ -133,7 +183,7 @@ def transform_raw_to_staging_pipeline():
         total_job = client.load_table_from_dataframe(
             df_total,
             total_target_table,
-            job_config=job_config
+            job_config=total_job_config
         )
         total_job.result()
 
