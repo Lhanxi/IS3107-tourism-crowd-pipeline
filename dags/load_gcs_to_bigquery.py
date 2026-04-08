@@ -20,7 +20,6 @@ API_BUCKET_NAME = os.getenv("API_BUCKET_NAME")
 KAGGLE_BUCKET_NAME = os.getenv("KAGGLE_BUCKET_NAME")
 EXCHANGE_RATE_BUCKET_NAME = os.getenv("EXCHANGE_RATE_BUCKET_NAME")
 DISTANCE_BUCKET_NAME = os.getenv("DISTANCE_BUCKET_NAME")
-MONTHLY_VISITOR_BUCKET_NAME = os.getenv("MONTHLY_VISITOR_BUCKET_NAME")
 PUBLIC_HOLIDAY_BUCKET_NAME = os.getenv("PUBLIC_HOLIDAY_BUCKET_NAME")
 
 LOCAL_DIR = "/tmp/airflow_bq_load"
@@ -214,35 +213,6 @@ def load_gcs_to_bigquery_pipeline():
             job.result()
 
             print(f"Loaded {blob.name} into {table_id}")
-    @task
-    def load_monthly_visitor_dataset():
-        storage_client = storage.Client()
-        bucket = storage_client.bucket(MONTHLY_VISITOR_BUCKET_NAME)
-
-        client = bigquery.Client()
-
-        blobs = list(bucket.list_blobs(prefix="raw/monthly_visitor_arrivals_markets/"))
-
-        for blob in blobs:
-            if not blob.name.endswith(".csv"):
-                continue
-
-            table_name = os.path.basename(blob.name).replace(".csv", "")
-            table_id = f"{PROJECT_ID}.{RAW_DATASET}.{table_name}"
-
-            uri = f"gs://{MONTHLY_VISITOR_BUCKET_NAME}/{blob.name}"
-
-            job_config = bigquery.LoadJobConfig(
-                source_format=bigquery.SourceFormat.CSV,
-                skip_leading_rows=1,
-                autodetect=True,
-                write_disposition="WRITE_TRUNCATE"
-            )
-
-            job = client.load_table_from_uri(uri, table_id, job_config=job_config)
-            job.result()
-
-            print(f"Loaded {blob.name} into {table_id}")
     
     @task
     def load_public_holidays():
@@ -397,9 +367,8 @@ def load_gcs_to_bigquery_pipeline():
     kaggle_task = load_kaggle_dataset()
     exchange_task = load_exchange_rates()
     distance_task = load_distance_dataset()
-    monthly_visitor_task = load_monthly_visitor_dataset()
     public_holiday_task = load_public_holidays()
     
-    dataset_task >> api_tasks >> kaggle_task >> exchange_task >> distance_task >> monthly_visitor_task >> public_holiday_task
+    dataset_task >> api_tasks >> kaggle_task >> exchange_task >> distance_task >> public_holiday_task
 
 load_gcs_to_bigquery_dag = load_gcs_to_bigquery_pipeline()

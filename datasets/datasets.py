@@ -10,5 +10,9 @@ DATASETS = {
     "monthly_average_hotel_rates": {
         "url": "https://data.gov.sg/api/action/datastore_search?resource_id=d_8e62605f0c1c948702b6ea0fe45242d3",
         "bucket_path": "raw/monthly_average_hotel_rates/monthly_average_hotel_rates.json"
+    },
+    "monthly_visitor_arrivals_markets": {
+        "url": "https://data.gov.sg/api/action/datastore_search?resource_id=d_c6d3f73a65d1fa3a92f1f4e70e619a66",
+        "bucket_path": "raw/monthly_visitor_arrivals_markets/monthly_visitor_arrivals_markets.json"
     }
 }
