@@ -35,16 +35,24 @@ projectroot/
 │   ├── upload_data_to_datalake.py
 │   ├── load_gcs_to_bigquery.py
 │   ├── transform_raw_to_staging.py
-│   ├── create_final_features_dag.py
+│   └── create_final_features_dag.py
 │
 ├── datasets/
-│   ├── datasets.py
+│   └── datasets.py
+│
+├── notebooks/
+│   ├── data_loading.ipynb
+│   ├── eda_features.ipynb
+│   ├── feature_engineering.ipynb
+│   ├── hotel_aircraft_traffic.ipynb
+│   ├── lag_regression.ipynb
+│   └── time_series_analysis.ipynb
 │
 ├── config/
-│   ├── airflow.cfg
+│   └── airflow.cfg
 │
 ├── keys/
-│   ├── gcp-key.json
+│   └── gcp-key.json
 │
 ├── logs/
 ├── plugins/
